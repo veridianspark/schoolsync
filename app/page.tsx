@@ -832,8 +832,11 @@ export default function Home() {
     );
   }
 
-  const todayKey =
-    formatDate(new Date());
+  const [todayKey, setTodayKey] = useState("");
+
+useEffect(() => {
+  setTodayKey(formatDate(new Date()));
+}, []);
 
   /* ==================================================
      RENDER
