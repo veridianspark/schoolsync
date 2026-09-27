@@ -1,349 +1,494 @@
-import { GoogleGenAI, Type } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
 
-export async function POST(req: NextRequest) {
+const API_KEY = process.env.GEMINI_API_KEY;
+
+const MODEL =
+  process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
+type GeminiPart = {
+  text?: string;
+  inlineData?: {
+    mimeType: string;
+    data: string;
+  };
+};
+
+async function callGemini(
+  parts: GeminiPart[]
+) {
+  if (!API_KEY) {
+    throw new Error(
+      "GEMINI_API_KEY is not configured."
+    );
+  }
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${API_KEY}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts,
+          },
+        ],
+        generationConfig: {
+          temperature: 0.3,
+          responseMimeType: "application/json",
+        },
+      }),
+    }
+  );
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `Gemini API error: ${text.slice(0, 500)}`
+    );
+  }
+
+  let data: any;
+
   try {
-    // --------------------------------------------------
-    // 1. Get API key
-    // --------------------------------------------------
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(
+      "Gemini returned an invalid response."
+    );
+  }
 
-    const apiKey =
-      process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  const output =
+    data?.candidates?.[0]?.content?.parts
+      ?.map((part: any) => part.text || "")
+      .join("")
+      .trim();
 
-    if (!apiKey) {
-      console.error("❌ GEMINI_API_KEY is not configured.");
+  if (!output) {
+    throw new Error(
+      "Gemini returned an empty response."
+    );
+  }
 
-      return NextResponse.json(
-        {
-          error:
-            "Gemini API key is missing. Add GEMINI_API_KEY to .env.local.",
-        },
-        { status: 500 }
-      );
+  return output;
+}
+
+function cleanJson(text: string) {
+  return text
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
+/* =====================================================
+   TASK ORGANIZER
+===================================================== */
+
+async function organizeTasks(
+  schoolInfo: string
+) {
+  const prompt = `
+You are SchoolSync, an AI schoolwork organizer.
+
+Analyze the student's school information below and
+extract every meaningful school task, assignment,
+quiz, test, presentation, reading, project, deadline,
+or other actionable schoolwork item.
+
+Return ONLY valid JSON.
+
+Use exactly this structure:
+
+{
+  "tasks": [
+    {
+      "title": "short task title",
+      "subject": "subject",
+      "due": "human-readable deadline",
+      "dueDate": "YYYY-MM-DD or empty string if unknown",
+      "priority": "High | Medium | Low",
+      "estimatedMinutes": 30,
+      "reason": "short explanation"
     }
+  ]
+}
 
-    // --------------------------------------------------
-    // 2. Read request
-    // --------------------------------------------------
+Rules:
+- Do not invent deadlines.
+- If a deadline is not provided, use "No deadline".
+- Infer the subject only when it is reasonably clear.
+- High priority means urgent, soon, or an important assessment.
+- Medium means a normal upcoming assignment.
+- Low means less urgent.
+- estimatedMinutes should be a reasonable estimate.
+- Extract multiple tasks when multiple tasks are present.
+- Keep titles concise.
+- Return an empty tasks array if there are no actionable tasks.
 
-    const body = await req.json();
+Student information:
 
-    const { schoolInfo } = body;
-
-    if (
-      typeof schoolInfo !== "string" ||
-      schoolInfo.trim().length === 0
-    ) {
-      return NextResponse.json(
-        {
-          error: "Please provide schoolInfo as a non-empty string.",
-        },
-        { status: 400 }
-      );
-    }
-
-    // Prevent accidentally sending enormous requests.
-    const cleanedSchoolInfo = schoolInfo.trim().slice(0, 12000);
-
-    // --------------------------------------------------
-    // 3. Create Gemini client
-    // --------------------------------------------------
-
-    const ai = new GoogleGenAI({
-      apiKey,
-    });
-
-    // --------------------------------------------------
-    // 4. Prompt
-    // --------------------------------------------------
-
-    const today = new Date().toISOString().split("T")[0];
-
-    const prompt = `
-You are SchoolSync, an AI assistant that organizes messy school information
-into a clear student task list.
-
-Today's date is ${today}.
-
-The student may paste:
-- assignments
-- homework
-- quizzes
-- exams
-- projects
-- reminders
-- teacher announcements
-- deadlines
-- school events
-- supplies they need to bring
-- general school instructions
-
-Your job is to extract actionable items from the student's text.
-
-IMPORTANT RULES:
-
-1. Do not invent assignments that are not present in the input.
-2. Preserve the meaning of the student's original information.
-3. Convert relative dates such as "tomorrow", "Friday", or "next Monday"
-   into useful human-readable due labels.
-4. If no date is given, use "No deadline".
-5. Determine the subject when it is obvious.
-6. If the subject cannot be determined, use "General".
-7. Assign a priority:
-   - High = urgent, important, exam/quiz soon, or deadline very close.
-   - Medium = normal upcoming schoolwork.
-   - Low = less urgent or flexible work.
-8. Estimate how many minutes a student might reasonably need.
-9. Keep task titles short and clear.
-10. Extract reminders such as "bring lab coat" as tasks when they are actionable.
-11. Do not create duplicate tasks.
-12. Choose one task as the recommended next task.
-13. Explain briefly why that task should be done next.
-14. Return ONLY the structured JSON requested by the schema.
-
-STUDENT'S SCHOOL INFORMATION:
-
-${cleanedSchoolInfo}
+${schoolInfo}
 `;
 
-    // --------------------------------------------------
-    // 5. Ask Gemini for structured JSON
-    // --------------------------------------------------
+  const output = await callGemini([
+    {
+      text: prompt,
+    },
+  ]);
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.6-flash",
-      contents: prompt,
+  const parsed = JSON.parse(
+    cleanJson(output)
+  );
 
-      config: {
-        temperature: 0.2,
+  if (!Array.isArray(parsed.tasks)) {
+    throw new Error(
+      "AI returned an invalid task list."
+    );
+  }
 
-        responseMimeType: "application/json",
+  return parsed;
+}
 
-        responseSchema: {
-          type: Type.OBJECT,
+/* =====================================================
+   STUDY MATERIAL ANALYZER
+===================================================== */
 
-          properties: {
-            tasks: {
-              type: Type.ARRAY,
+async function analyzeStudyMaterial(
+  notes: string,
+  files: File[]
+) {
+  const parts: GeminiPart[] = [];
 
-              items: {
-                type: Type.OBJECT,
+  const prompt = `
+You are SchoolSync AI, a study assistant.
 
-                properties: {
-                  title: {
-                    type: Type.STRING,
-                  },
+Analyze the student's study material carefully.
 
-                  subject: {
-                    type: Type.STRING,
-                  },
+The material may contain:
+- pasted notes
+- textbook material
+- lecture notes
+- essays
+- PDFs
+- screenshots
+- photographs of handwritten notes
+- TXT files
+- Markdown files
 
-                  due: {
-                    type: Type.STRING,
-                  },
+Your job is to transform the supplied material into
+a useful study guide.
 
-                  priority: {
-                    type: Type.STRING,
-                    enum: ["High", "Medium", "Low"],
-                  },
+IMPORTANT:
+- Base the response on the supplied material.
+- Do not invent facts that are not supported by it.
+- Preserve important terminology from the material.
+- Do not omit major concepts merely to make the response shorter.
+- If something is unclear in the material, say so rather than guessing.
+- Make the explanation suitable for a student.
 
-                  estimatedMinutes: {
-                    type: Type.NUMBER,
-                  },
+Return ONLY valid JSON with exactly this structure:
 
-                  reason: {
-                    type: Type.STRING,
-                  },
-                },
+{
+  "summary": "A clear but detailed summary of the material.",
+  "keyPoints": [
+    "Important concept 1",
+    "Important concept 2",
+    "Important concept 3"
+  ],
+  "flowchart": [
+    {
+      "step": 1,
+      "title": "First major concept",
+      "description": "Explain what happens or what this concept means."
+    },
+    {
+      "step": 2,
+      "title": "Next concept",
+      "description": "Explain the relationship to the previous concept."
+    }
+  ],
+  "questions": [
+    {
+      "question": "A useful revision question.",
+      "answer": "The answer based on the supplied material."
+    }
+  ]
+}
 
-                required: [
-                  "title",
-                  "subject",
-                  "due",
-                  "priority",
-                  "estimatedMinutes",
-                  "reason",
-                ],
-              },
-            },
+Requirements:
 
-            nextTaskIndex: {
-              type: Type.NUMBER,
-            },
+SUMMARY
+- Explain the central ideas clearly.
+- Preserve important details.
+- Organize a long essay into understandable sections
+  when appropriate.
 
-            nextTaskReason: {
-              type: Type.STRING,
-            },
+KEY POINTS
+- Extract the most important concepts.
+- Include terminology a student should remember.
+- Aim for 5-10 useful points when the material supports it.
 
-            summary: {
-              type: Type.STRING,
-            },
-          },
+FLOWCHART
+- Show the logical progression of the material.
+- Use 4-10 steps when possible.
+- Each step must have a meaningful title and explanation.
+- If the material describes a process, make the flow follow
+  that process.
+- If it is conceptual rather than procedural, show the
+  relationships between the major ideas.
 
-          required: [
-            "tasks",
-            "nextTaskIndex",
-            "nextTaskReason",
-            "summary",
-          ],
-        },
+REVISION QUESTIONS
+- Create useful study questions from the supplied material.
+- Mix recall and understanding questions.
+- Include approximately 5-10 questions when enough material
+  is available.
+- Answers must be supported by the supplied material.
+
+If the material is very short, return fewer items rather
+than inventing information.
+`;
+
+  parts.push({
+    text: prompt,
+  });
+
+  if (notes.trim()) {
+    parts.push({
+      text: `PASTED STUDY NOTES:\n\n${notes}`,
+    });
+  }
+
+  /*
+   * Gemini can directly understand supported image/PDF
+   * content when supplied as inlineData.
+   */
+  for (const file of files) {
+    const arrayBuffer =
+      await file.arrayBuffer();
+
+    const buffer = Buffer.from(arrayBuffer);
+
+    parts.push({
+      text: `ATTACHED FILE: ${file.name}`,
+    });
+
+    parts.push({
+      inlineData: {
+        mimeType:
+          file.type || "application/octet-stream",
+        data: buffer.toString("base64"),
       },
     });
+  }
 
-    // --------------------------------------------------
-    // 6. Parse Gemini response
-    // --------------------------------------------------
+  const output = await callGemini(parts);
 
-    const text = response.text;
+  let parsed: any;
 
-    if (!text) {
-      console.error("❌ Gemini returned an empty response.");
+  try {
+    parsed = JSON.parse(
+      cleanJson(output)
+    );
+  } catch {
+    throw new Error(
+      "AI returned invalid study-analysis JSON."
+    );
+  }
 
-      return NextResponse.json(
-        {
-          error: "Gemini returned an empty response.",
-        },
-        { status: 502 }
-      );
-    }
+  if (
+    typeof parsed.summary !== "string" ||
+    !Array.isArray(parsed.keyPoints) ||
+    !Array.isArray(parsed.flowchart) ||
+    !Array.isArray(parsed.questions)
+  ) {
+    throw new Error(
+      "AI returned an incomplete study analysis."
+    );
+  }
 
-    let data: any;
+  return parsed;
+}
 
-    try {
-      data = JSON.parse(text);
-    } catch (parseError) {
-      console.error("❌ Failed to parse Gemini JSON:", text);
+/* =====================================================
+   POST
+===================================================== */
 
-      return NextResponse.json(
-        {
-          error: "Gemini returned invalid JSON.",
-        },
-        { status: 502 }
-      );
-    }
+export async function POST(
+  request: NextRequest
+) {
+  try {
+    const contentType =
+      request.headers.get("content-type") || "";
 
-    // --------------------------------------------------
-    // 7. Validate the response
-    // --------------------------------------------------
-
-    if (!Array.isArray(data.tasks)) {
-      return NextResponse.json(
-        {
-          error: "Gemini returned an invalid task list.",
-        },
-        { status: 502 }
-      );
-    }
-
-    // Clean and normalize tasks before sending them to frontend.
-    const tasks = data.tasks
-      .filter(
-        (task: any) =>
-          task &&
-          typeof task.title === "string" &&
-          task.title.trim().length > 0
+    /*
+     * EXISTING TASK ORGANIZER
+     *
+     * page.tsx sends JSON here.
+     */
+    if (
+      contentType.includes(
+        "application/json"
       )
-      .map((task: any, index: number) => ({
-        id: Date.now() + index,
-
-        title: task.title.trim(),
-
-        subject:
-          typeof task.subject === "string" && task.subject.trim()
-            ? task.subject.trim()
-            : "General",
-
-        due:
-          typeof task.due === "string" && task.due.trim()
-            ? task.due.trim()
-            : "No deadline",
-
-        priority:
-          task.priority === "High" ||
-          task.priority === "Medium" ||
-          task.priority === "Low"
-            ? task.priority
-            : "Medium",
-
-        estimatedMinutes:
-          typeof task.estimatedMinutes === "number" &&
-          Number.isFinite(task.estimatedMinutes)
-            ? Math.max(
-                5,
-                Math.min(600, Math.round(task.estimatedMinutes))
-              )
-            : 30,
-
-        reason:
-          typeof task.reason === "string" && task.reason.trim()
-            ? task.reason.trim()
-            : "Upcoming schoolwork.",
-
-        completed: false,
-      }));
-
-    // --------------------------------------------------
-    // 8. Determine recommended task
-    // --------------------------------------------------
-
-    let nextTaskIndex =
-      typeof data.nextTaskIndex === "number"
-        ? Math.floor(data.nextTaskIndex)
-        : 0;
-
-    if (tasks.length === 0) {
-      nextTaskIndex = -1;
-    } else if (
-      nextTaskIndex < 0 ||
-      nextTaskIndex >= tasks.length
     ) {
-      nextTaskIndex = 0;
+      const body = await request.json();
+
+      const mode =
+        body?.mode || "tasks";
+
+      if (mode !== "tasks") {
+        return NextResponse.json(
+          {
+            error:
+              "Invalid JSON request mode.",
+          },
+          { status: 400 }
+        );
+      }
+
+      const schoolInfo =
+        typeof body?.schoolInfo === "string"
+          ? body.schoolInfo.trim()
+          : "";
+
+      if (!schoolInfo) {
+        return NextResponse.json(
+          {
+            error:
+              "Please provide school information.",
+          },
+          { status: 400 }
+        );
+      }
+
+      const result =
+        await organizeTasks(
+          schoolInfo
+        );
+
+      return NextResponse.json(
+        result
+      );
     }
 
-    const nextTask =
-      nextTaskIndex >= 0 ? tasks[nextTaskIndex] : null;
+    /*
+     * NEW STUDY ANALYZER
+     *
+     * page.tsx sends FormData here so it can
+     * include notes + images + PDFs + text files.
+     */
+    if (
+      contentType.includes(
+        "multipart/form-data"
+      )
+    ) {
+      const formData =
+        await request.formData();
 
-    const nextTaskReason =
-      typeof data.nextTaskReason === "string"
-        ? data.nextTaskReason.trim()
-        : nextTask
-        ? nextTask.reason
-        : "No urgent tasks were found.";
+      const mode =
+        String(
+          formData.get("mode") || ""
+        );
 
-    const summary =
-      typeof data.summary === "string"
-        ? data.summary.trim()
-        : `Found ${tasks.length} school task${
-            tasks.length === 1 ? "" : "s"
-          }.`;
+      if (mode !== "study") {
+        return NextResponse.json(
+          {
+            error:
+              "Invalid study request.",
+          },
+          { status: 400 }
+        );
+      }
 
-    // --------------------------------------------------
-    // 9. Return clean response
-    // --------------------------------------------------
+      const notes =
+        String(
+          formData.get("notes") || ""
+        );
 
-    return NextResponse.json({
-      success: true,
+      const files = formData
+        .getAll("files")
+        .filter(
+          (item): item is File =>
+            item instanceof File
+        );
 
-      tasks,
+      if (
+        !notes.trim() &&
+        files.length === 0
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              "Please provide notes or at least one file.",
+          },
+          { status: 400 }
+        );
+      }
 
-      nextTask,
+      /*
+       * Prevent unexpectedly huge requests.
+       */
+      const MAX_FILES = 10;
+      const MAX_FILE_SIZE =
+        15 * 1024 * 1024;
 
-      nextTaskReason,
+      if (files.length > MAX_FILES) {
+        return NextResponse.json(
+          {
+            error:
+              `You can upload up to ${MAX_FILES} files at once.`,
+          },
+          { status: 400 }
+        );
+      }
 
-      summary,
+      for (const file of files) {
+        if (
+          file.size > MAX_FILE_SIZE
+        ) {
+          return NextResponse.json(
+            {
+              error:
+                `${file.name} is too large. Please keep files under 15 MB.`,
+            },
+            { status: 400 }
+          );
+        }
+      }
 
-      generatedAt: new Date().toISOString(),
-    });
-  } catch (error: any) {
-    console.error("💥 SCHOOLSYNC API ERROR:", error);
+      const result =
+        await analyzeStudyMaterial(
+          notes,
+          files
+        );
 
-    const message =
-      error?.message || "Something went wrong while organizing your schoolwork.";
+      return NextResponse.json(
+        result
+      );
+    }
 
     return NextResponse.json(
       {
-        success: false,
-        error: message,
+        error:
+          "Unsupported request type.",
+      },
+      { status: 415 }
+    );
+  } catch (error: any) {
+    console.error(
+      "SchoolSync API error:",
+      error
+    );
+
+    return NextResponse.json(
+      {
+        error:
+          error?.message ||
+          "Something went wrong while processing your request.",
       },
       { status: 500 }
     );
