@@ -101,6 +101,7 @@ function getDateFromDue(
   if (!due) return undefined;
 
   const text = String(due).trim().toLowerCase();
+  const today = new Date();
 
   if (!text || text === "no deadline") {
     return undefined;
