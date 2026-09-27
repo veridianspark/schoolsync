@@ -61,7 +61,11 @@ const defaultTasks: Task[] = [
   },
 ];
 
-function formatDate(date: Date) {
+/* ==================================================
+   DATE HELPERS
+================================================== */
+
+function formatDate(date: Date): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
@@ -69,7 +73,7 @@ function formatDate(date: Date) {
   return `${year}-${month}-${day}`;
 }
 
-function getStartOfWeek(date: Date) {
+function getStartOfWeek(date: Date): Date {
   const result = new Date(date);
   const day = result.getDay();
 
@@ -79,28 +83,100 @@ function getStartOfWeek(date: Date) {
   return result;
 }
 
-function getDateFromDue(due: string): string | undefined {
-  const text = due.trim().toLowerCase();
-  const today = new Date();
+/**
+ * Converts many possible AI date formats into:
+ *
+ * YYYY-MM-DD
+ *
+ * Examples:
+ * "today"       -> 2026-09-28
+ * "tomorrow"    -> 2026-09-29
+ * "Friday"      -> next Friday
+ * "2026-10-02"  -> 2026-10-02
+ * "2026-10-02T00:00:00" -> 2026-10-02
+ */
+function getDateFromDue(
+  due: string | undefined | null
+): string | undefined {
+  if (!due) return undefined;
+
+  const text = String(due).trim().toLowerCase();
 
   if (!text || text === "no deadline") {
     return undefined;
   }
 
-  // ISO date such as 2026-09-28
-  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
-    return text;
+  const today = new Date();
+
+  /* ------------------------------------------
+     ISO DATE
+  ------------------------------------------ */
+
+  const isoMatch = text.match(
+    /^(\d{4})-(\d{2})-(\d{2})/
+  );
+
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+
+    const date = new Date(
+      year,
+      month - 1,
+      day
+    );
+
+    if (
+      date.getFullYear() === year &&
+      date.getMonth() === month - 1 &&
+      date.getDate() === day
+    ) {
+      return formatDate(date);
+    }
   }
 
-  if (text.includes("today")) {
+  /* ------------------------------------------
+     TODAY
+  ------------------------------------------ */
+
+  if (
+    text === "today" ||
+    text.includes("today")
+  ) {
     return formatDate(today);
   }
 
-  if (text.includes("tomorrow")) {
+  /* ------------------------------------------
+     TOMORROW
+  ------------------------------------------ */
+
+  if (
+    text === "tomorrow" ||
+    text.includes("tomorrow")
+  ) {
     const date = new Date(today);
     date.setDate(date.getDate() + 1);
+
     return formatDate(date);
   }
+
+  /* ------------------------------------------
+     DAY AFTER TOMORROW
+  ------------------------------------------ */
+
+  if (
+    text.includes("day after tomorrow")
+  ) {
+    const date = new Date(today);
+    date.setDate(date.getDate() + 2);
+
+    return formatDate(date);
+  }
+
+  /* ------------------------------------------
+     WEEKDAYS
+  ------------------------------------------ */
 
   const weekdays = [
     "sunday",
@@ -112,24 +188,54 @@ function getDateFromDue(due: string): string | undefined {
     "saturday",
   ];
 
+  const shortWeekdays = [
+    "sun",
+    "mon",
+    "tue",
+    "wed",
+    "thu",
+    "fri",
+    "sat",
+  ];
+
   for (let i = 0; i < weekdays.length; i++) {
-    if (text.includes(weekdays[i])) {
+    const fullDay = weekdays[i];
+    const shortDay = shortWeekdays[i];
+
+    if (
+      text === fullDay ||
+      text.includes(fullDay) ||
+      text === shortDay ||
+      text.includes(shortDay)
+    ) {
       const currentDay = today.getDay();
+
       let difference = i - currentDay;
 
+      // Always choose the next occurrence.
       if (difference <= 0) {
         difference += 7;
       }
 
       const date = new Date(today);
-      date.setDate(date.getDate() + difference);
+      date.setDate(
+        date.getDate() + difference
+      );
 
       return formatDate(date);
     }
   }
 
-  // Try parsing normal date strings
-  const parsed = new Date(due);
+  /* ------------------------------------------
+     COMMON DATE FORMATS
+  ------------------------------------------ */
+
+  const normalizedDate = text
+    .replace(/,/g, "")
+    .replace(/\./g, "")
+    .trim();
+
+  const parsed = new Date(normalizedDate);
 
   if (!Number.isNaN(parsed.getTime())) {
     return formatDate(parsed);
@@ -138,37 +244,136 @@ function getDateFromDue(due: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Makes sure a task has a valid calendar date.
+ *
+ * We prefer scheduledDate only when it can actually
+ * be converted to YYYY-MM-DD.
+ *
+ * Otherwise we fall back to due.
+ */
+function getTaskDate(
+  task: Task
+): string | undefined {
+  const scheduled =
+    getDateFromDue(task.scheduledDate);
+
+  if (scheduled) {
+    return scheduled;
+  }
+
+  return getDateFromDue(task.due);
+}
+
+/* ==================================================
+   MAIN COMPONENT
+================================================== */
+
 export default function Home() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [schoolInfo, setSchoolInfo] = useState("");
   const [showInput, setShowInput] = useState(false);
-  const [isOrganizing, setIsOrganizing] = useState(false);
+  const [isOrganizing, setIsOrganizing] =
+    useState(false);
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
 
-  const [calendarMonth, setCalendarMonth] = useState(() => {
-    const today = new Date();
+  const [calendarMonth, setCalendarMonth] =
+    useState(() => {
+      const today = new Date();
 
-    return new Date(
-      today.getFullYear(),
-      today.getMonth(),
-      1
-    );
-  });
+      return new Date(
+        today.getFullYear(),
+        today.getMonth(),
+        1
+      );
+    });
 
-  // --------------------------------------------------
-  // LOAD TASKS
-  // --------------------------------------------------
+  /* ==================================================
+     LOAD TASKS
+  ================================================== */
 
   useEffect(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
+      const saved =
+        localStorage.getItem(STORAGE_KEY);
 
       if (saved) {
         const parsed = JSON.parse(saved);
 
         if (Array.isArray(parsed)) {
-          setTasks(parsed);
+          /*
+           * Repair old tasks when loading.
+           *
+           * This is important because older tasks may
+           * have had:
+           *
+           * scheduledDate: "Friday"
+           *
+           * instead of:
+           *
+           * scheduledDate: "2026-10-02"
+           */
+          const repairedTasks: Task[] =
+            parsed.map((task: any) => {
+              const repairedDate =
+                getDateFromDue(
+                  task.scheduledDate
+                ) ||
+                getDateFromDue(task.due);
+
+              return {
+                id:
+                  typeof task.id === "number"
+                    ? task.id
+                    : Date.now() +
+                      Math.floor(
+                        Math.random() * 10000
+                      ),
+
+                title: String(
+                  task.title ||
+                    "Untitled task"
+                ),
+
+                subject: String(
+                  task.subject ||
+                    "General"
+                ),
+
+                due: String(
+                  task.due ||
+                    "No deadline"
+                ),
+
+                priority:
+                  task.priority === "High" ||
+                  task.priority === "Medium" ||
+                  task.priority === "Low"
+                    ? task.priority
+                    : "Medium",
+
+                estimatedMinutes:
+                  typeof task.estimatedMinutes ===
+                  "number"
+                    ? task.estimatedMinutes
+                    : 30,
+
+                reason:
+                  typeof task.reason ===
+                  "string"
+                    ? task.reason
+                    : undefined,
+
+                completed:
+                  Boolean(task.completed),
+
+                scheduledDate:
+                  repairedDate,
+              };
+            });
+
+          setTasks(repairedTasks);
         } else {
           setTasks(defaultTasks);
         }
@@ -176,54 +381,72 @@ export default function Home() {
         setTasks(defaultTasks);
       }
     } catch (err) {
-      console.error("Could not load saved tasks:", err);
+      console.error(
+        "Could not load saved tasks:",
+        err
+      );
+
       setTasks(defaultTasks);
     } finally {
       setLoaded(true);
     }
   }, []);
 
-  // --------------------------------------------------
-  // SAVE TASKS
-  // --------------------------------------------------
+  /* ==================================================
+     SAVE TASKS
+  ================================================== */
 
   useEffect(() => {
     if (!loaded) return;
 
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify(tasks)
+      );
     } catch (err) {
-      console.error("Could not save tasks:", err);
+      console.error(
+        "Could not save tasks:",
+        err
+      );
     }
   }, [tasks, loaded]);
 
-  // --------------------------------------------------
-  // PROGRESS
-  // --------------------------------------------------
+  /* ==================================================
+     PROGRESS
+  ================================================== */
 
-  const completedTasks = tasks.filter(
-    (task) => task.completed
-  ).length;
+  const completedTasks =
+    tasks.filter(
+      (task) => task.completed
+    ).length;
 
   const progress =
     tasks.length === 0
       ? 0
       : Math.round(
-          (completedTasks / tasks.length) * 100
+          (completedTasks /
+            tasks.length) *
+            100
         );
 
-  // --------------------------------------------------
-  // RECOMMENDED TASK
-  // --------------------------------------------------
+  /* ==================================================
+     RECOMMENDED TASK
+  ================================================== */
 
   const nextTask = useMemo(() => {
     const incomplete = tasks.filter(
       (task) => !task.completed
     );
 
-    if (incomplete.length === 0) return null;
+    if (incomplete.length === 0) {
+      return null;
+    }
 
-    const priorityOrder: Record<Priority, number> = {
+    const priorityOrder: Record<
+      Priority,
+      number
+    > = {
       High: 0,
       Medium: 1,
       Low: 2,
@@ -236,9 +459,9 @@ export default function Home() {
     )[0];
   }, [tasks]);
 
-  // --------------------------------------------------
-  // TOGGLE TASK
-  // --------------------------------------------------
+  /* ==================================================
+     TOGGLE TASK
+  ================================================== */
 
   function toggleTask(id: number) {
     setTasks((current) =>
@@ -246,16 +469,17 @@ export default function Home() {
         task.id === id
           ? {
               ...task,
-              completed: !task.completed,
+              completed:
+                !task.completed,
             }
           : task
       )
     );
   }
 
-  // --------------------------------------------------
-  // SCROLL NAVIGATION
-  // --------------------------------------------------
+  /* ==================================================
+     NAVIGATION
+  ================================================== */
 
   function goTo(id: string) {
     document
@@ -266,15 +490,16 @@ export default function Home() {
       });
   }
 
-  // --------------------------------------------------
-  // ORGANIZE WITH GEMINI
-  // --------------------------------------------------
+  /* ==================================================
+     ORGANIZE WITH GEMINI
+  ================================================== */
 
   async function organizeTasks() {
     if (!schoolInfo.trim()) {
       setError(
         "Paste some school information first."
       );
+
       return;
     }
 
@@ -287,15 +512,18 @@ export default function Home() {
         {
           method: "POST",
           headers: {
-            "Content-Type": "application/json",
+            "Content-Type":
+              "application/json",
           },
           body: JSON.stringify({
-            schoolInfo: schoolInfo.trim(),
+            schoolInfo:
+              schoolInfo.trim(),
           }),
         }
       );
 
-      const data = await response.json();
+      const data =
+        await response.json();
 
       if (!response.ok) {
         throw new Error(
@@ -310,99 +538,152 @@ export default function Home() {
         );
       }
 
+      /* ------------------------------------------
+         CREATE NEW TASKS
+      ------------------------------------------ */
+
       const incomingTasks: Task[] =
         data.tasks.map(
-          (task: any, index: number) => ({
-            id:
-              Date.now() +
-              index +
-              Math.floor(Math.random() * 1000),
+          (
+            task: any,
+            index: number
+          ) => {
+            const due =
+              String(
+                task.due ||
+                  "No deadline"
+              );
 
-            title: String(
-              task.title || "Untitled task"
-            ),
+            /*
+             * IMPORTANT:
+             *
+             * Gemini might return:
+             *
+             * scheduledDate: "Friday"
+             *
+             * or:
+             *
+             * scheduledDate: "2026-10-02"
+             *
+             * or not return it at all.
+             *
+             * We normalize everything here.
+             */
+            const scheduledDate =
+              getDateFromDue(
+                task.scheduledDate
+              ) ||
+              getDateFromDue(due);
 
-            subject: String(
-              task.subject || "General"
-            ),
+            return {
+              id:
+                Date.now() +
+                index +
+                Math.floor(
+                  Math.random() * 1000
+                ),
 
-            due: String(
-              task.due || "No deadline"
-            ),
+              title: String(
+                task.title ||
+                  "Untitled task"
+              ),
 
-            priority:
-              task.priority === "High" ||
-              task.priority === "Medium" ||
-              task.priority === "Low"
-                ? task.priority
-                : "Medium",
+              subject: String(
+                task.subject ||
+                  "General"
+              ),
 
-            estimatedMinutes:
-              typeof task.estimatedMinutes ===
-              "number"
-                ? task.estimatedMinutes
-                : 30,
+              due,
 
-            reason:
-              typeof task.reason === "string"
-                ? task.reason
-                : "Upcoming schoolwork.",
+              priority:
+                task.priority ===
+                  "High" ||
+                task.priority ===
+                  "Medium" ||
+                task.priority ===
+                  "Low"
+                  ? task.priority
+                  : "Medium",
 
-            completed: false,
+              estimatedMinutes:
+                typeof task.estimatedMinutes ===
+                "number"
+                  ? task.estimatedMinutes
+                  : 30,
 
-            scheduledDate:
-              typeof task.scheduledDate ===
-              "string"
-                ? task.scheduledDate
-                : getDateFromDue(
-                    String(
-                      task.due ||
-                        "No deadline"
-                    )
-                  ),
-          })
+              reason:
+                typeof task.reason ===
+                "string"
+                  ? task.reason
+                  : "Upcoming schoolwork.",
+
+              completed: false,
+
+              scheduledDate,
+            };
+          }
         );
+
+      /* ------------------------------------------
+         REMOVE DUPLICATES
+      ------------------------------------------ */
 
       setTasks((current) => {
-        const existingKeys = new Set(
-          current.map(
-            (task) =>
-              `${task.title
-                .toLowerCase()
-                .trim()}|${task.subject
-                .toLowerCase()
-                .trim()}`
-          )
-        );
+        const existingKeys =
+          new Set(
+            current.map(
+              (task) =>
+                `${task.title
+                  .toLowerCase()
+                  .trim()}|${task.subject
+                  .toLowerCase()
+                  .trim()}`
+            )
+          );
 
         const newTasks =
-          incomingTasks.filter((task) => {
-            const key = `${task.title
-              .toLowerCase()
-              .trim()}|${task.subject
-              .toLowerCase()
-              .trim()}`;
+          incomingTasks.filter(
+            (task) => {
+              const key =
+                `${task.title
+                  .toLowerCase()
+                  .trim()}|${task.subject
+                  .toLowerCase()
+                  .trim()}`;
 
-            if (existingKeys.has(key)) {
-              return false;
+              if (
+                existingKeys.has(key)
+              ) {
+                return false;
+              }
+
+              existingKeys.add(key);
+
+              return true;
             }
+          );
 
-            existingKeys.add(key);
-
-            return true;
-          });
-
-        return [...current, ...newTasks];
+        return [
+          ...current,
+          ...newTasks,
+        ];
       });
+
+      /* ------------------------------------------
+         CLEAR INPUT
+      ------------------------------------------ */
 
       setSchoolInfo("");
       setShowInput(false);
 
-      // Show the month containing the first
-      // newly-created scheduled task.
+      /* ------------------------------------------
+         MOVE CALENDAR TO NEW TASK
+      ------------------------------------------ */
+
       const firstDate =
         incomingTasks.find(
-          (task) => task.scheduledDate
+          (task) =>
+            task.scheduledDate
         )?.scheduledDate;
 
       if (firstDate) {
@@ -410,7 +691,11 @@ export default function Home() {
           `${firstDate}T00:00:00`
         );
 
-        if (!Number.isNaN(date.getTime())) {
+        if (
+          !Number.isNaN(
+            date.getTime()
+          )
+        ) {
           setCalendarMonth(
             new Date(
               date.getFullYear(),
@@ -435,9 +720,9 @@ export default function Home() {
     }
   }
 
-  // --------------------------------------------------
-  // CALENDAR
-  // --------------------------------------------------
+  /* ==================================================
+     CALENDAR DAYS
+  ================================================== */
 
   const calendarDays = useMemo(() => {
     const firstDay = new Date(
@@ -446,32 +731,47 @@ export default function Home() {
       1
     );
 
-    const lastDay = new Date(
-      calendarMonth.getFullYear(),
-      calendarMonth.getMonth() + 1,
-      0
-    );
-
-    const start = getStartOfWeek(firstDay);
+    const start =
+      getStartOfWeek(firstDay);
 
     const days: Date[] = [];
 
     for (let i = 0; i < 42; i++) {
       const date = new Date(start);
-      date.setDate(start.getDate() + i);
+
+      date.setDate(
+        start.getDate() + i
+      );
+
       days.push(date);
     }
 
     return days;
   }, [calendarMonth]);
 
+  /* ==================================================
+     TASKS BY DATE
+  ================================================== */
+
   const tasksByDate = useMemo(() => {
-    const map: Record<string, Task[]> = {};
+    const map: Record<
+      string,
+      Task[]
+    > = {};
 
     for (const task of tasks) {
+      /*
+       * Always normalize the date here too.
+       *
+       * This means even old tasks stored in
+       * localStorage with:
+       *
+       * scheduledDate: "Friday"
+       *
+       * will still appear correctly.
+       */
       const date =
-        task.scheduledDate ||
-        getDateFromDue(task.due);
+        getTaskDate(task);
 
       if (!date) continue;
 
@@ -484,6 +784,10 @@ export default function Home() {
 
     return map;
   }, [tasks]);
+
+  /* ==================================================
+     CALENDAR NAVIGATION
+  ================================================== */
 
   const monthName =
     calendarMonth.toLocaleDateString(
@@ -528,19 +832,23 @@ export default function Home() {
     );
   }
 
-  const todayKey = formatDate(new Date());
+  const todayKey =
+    formatDate(new Date());
 
-  // --------------------------------------------------
-  // RENDER
-  // --------------------------------------------------
+  /* ==================================================
+     RENDER
+  ================================================== */
 
   return (
     <main className="min-h-screen bg-[#f7f8fc] text-slate-900">
       {/* NAVIGATION */}
+
       <nav className="sticky top-0 z-50 border-b border-slate-200 bg-white/95 backdrop-blur">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
           <button
-            onClick={() => goTo("dashboard")}
+            onClick={() =>
+              goTo("dashboard")
+            }
             className="flex items-center gap-3 text-left"
           >
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-900 text-lg font-bold text-white">
@@ -560,28 +868,36 @@ export default function Home() {
 
           <div className="hidden items-center gap-6 text-sm font-medium sm:flex">
             <button
-              onClick={() => goTo("dashboard")}
+              onClick={() =>
+                goTo("dashboard")
+              }
               className="text-slate-600 transition hover:text-indigo-600"
             >
               Dashboard
             </button>
 
             <button
-              onClick={() => goTo("tasks")}
+              onClick={() =>
+                goTo("tasks")
+              }
               className="text-slate-600 transition hover:text-indigo-600"
             >
               Tasks
             </button>
 
             <button
-              onClick={() => goTo("calendar")}
+              onClick={() =>
+                goTo("calendar")
+              }
               className="text-slate-600 transition hover:text-indigo-600"
             >
               Calendar
             </button>
 
             <button
-              onClick={() => goTo("progress")}
+              onClick={() =>
+                goTo("progress")
+              }
               className="text-slate-600 transition hover:text-indigo-600"
             >
               Progress
@@ -595,7 +911,10 @@ export default function Home() {
       </nav>
 
       <div className="mx-auto max-w-7xl px-6 py-10">
-        {/* DASHBOARD */}
+        {/* ==================================================
+            DASHBOARD
+        ================================================== */}
+
         <section id="dashboard">
           <div className="mb-8">
             <div className="flex flex-col justify-between gap-5 md:flex-row md:items-end">
@@ -609,13 +928,16 @@ export default function Home() {
                 </h2>
 
                 <p className="mt-3 max-w-2xl text-lg text-slate-500">
-                  Here&apos;s what needs your attention today.
+                  Here&apos;s what needs your
+                  attention today.
                 </p>
               </div>
 
               <button
                 onClick={() => {
-                  setShowInput(!showInput);
+                  setShowInput(
+                    !showInput
+                  );
                   setError("");
                 }}
                 className="rounded-xl bg-slate-900 px-5 py-3 font-semibold text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-slate-800"
@@ -626,6 +948,7 @@ export default function Home() {
           </div>
 
           {/* AI INPUT */}
+
           {showInput && (
             <section className="mb-8 overflow-hidden rounded-2xl border border-indigo-100 bg-white shadow-sm">
               <div className="border-b border-slate-100 px-6 py-5">
@@ -634,9 +957,10 @@ export default function Home() {
                 </p>
 
                 <p className="mt-1 text-sm text-slate-500">
-                  Paste an assignment, announcement,
-                  email, or messy list. SchoolSync
-                  will organize it for you.
+                  Paste an assignment,
+                  announcement, email, or
+                  messy list. SchoolSync will
+                  organize it for you.
                 </p>
               </div>
 
@@ -666,12 +990,15 @@ History presentation due Monday.`}
 
                 <div className="mt-4 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
                   <p className="text-xs text-slate-400">
-                    ✨ AI will identify deadlines,
-                    subjects, and priorities.
+                    ✨ AI will identify
+                    deadlines, subjects,
+                    and priorities.
                   </p>
 
                   <button
-                    onClick={organizeTasks}
+                    onClick={
+                      organizeTasks
+                    }
                     disabled={
                       !schoolInfo.trim() ||
                       isOrganizing
@@ -688,8 +1015,10 @@ History presentation due Monday.`}
           )}
 
           {/* TOP CARDS */}
+
           <section className="grid gap-5 lg:grid-cols-3">
             {/* NEXT TASK */}
+
             <div className="relative overflow-hidden rounded-2xl bg-slate-950 p-6 text-white shadow-lg lg:col-span-2">
               <div className="absolute -right-16 -top-16 h-40 w-40 rounded-full bg-indigo-500/20 blur-2xl" />
 
@@ -701,7 +1030,8 @@ History presentation due Monday.`}
                     </p>
 
                     <p className="mt-1 text-xs text-slate-500">
-                      Based on urgency and priority
+                      Based on urgency and
+                      priority
                     </p>
                   </div>
 
@@ -722,7 +1052,8 @@ History presentation due Monday.`}
                       </span>
 
                       <span className="rounded-full bg-white/10 px-3 py-1.5 text-sm text-slate-300">
-                        Due {nextTask.due}
+                        Due{" "}
+                        {nextTask.due}
                       </span>
 
                       {nextTask.estimatedMinutes && (
@@ -768,11 +1099,13 @@ History presentation due Monday.`}
                 ) : (
                   <div>
                     <h3 className="text-2xl font-bold">
-                      You&apos;re all caught up! 🎉
+                      You&apos;re all caught
+                      up! 🎉
                     </h3>
 
                     <p className="mt-2 text-slate-400">
-                      Nothing urgent needs your attention.
+                      Nothing urgent needs
+                      your attention.
                     </p>
                   </div>
                 )}
@@ -780,6 +1113,7 @@ History presentation due Monday.`}
             </div>
 
             {/* PROGRESS */}
+
             <div
               id="progress"
               className="scroll-mt-28 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"
@@ -817,7 +1151,10 @@ History presentation due Monday.`}
           </section>
         </section>
 
-        {/* TASKS */}
+        {/* ==================================================
+            TASKS
+        ================================================== */}
+
         <section
           id="tasks"
           className="mt-12 scroll-mt-28"
@@ -840,15 +1177,18 @@ History presentation due Monday.`}
 
           {tasks.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center">
-              <div className="text-4xl">📚</div>
+              <div className="text-4xl">
+                📚
+              </div>
 
               <h4 className="mt-4 font-bold">
                 No schoolwork yet
               </h4>
 
               <p className="mt-2 text-sm text-slate-500">
-                Add an assignment or announcement
-                to get started.
+                Add an assignment or
+                announcement to get
+                started.
               </p>
 
               <button
@@ -875,7 +1215,10 @@ History presentation due Monday.`}
           )}
         </section>
 
-        {/* CALENDAR */}
+        {/* ==================================================
+            CALENDAR
+        ================================================== */}
+
         <section
           id="calendar"
           className="mt-12 scroll-mt-28 rounded-2xl border border-slate-200 bg-white shadow-sm"
@@ -894,14 +1237,18 @@ History presentation due Monday.`}
 
               <div className="flex items-center gap-2">
                 <button
-                  onClick={todayMonth}
+                  onClick={
+                    todayMonth
+                  }
                   className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold hover:bg-slate-50"
                 >
                   Today
                 </button>
 
                 <button
-                  onClick={previousMonth}
+                  onClick={
+                    previousMonth
+                  }
                   aria-label="Previous month"
                   className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 text-lg hover:bg-slate-50"
                 >
@@ -921,6 +1268,7 @@ History presentation due Monday.`}
 
           <div className="p-3 sm:p-5">
             {/* WEEKDAYS */}
+
             <div className="grid grid-cols-7 border-b border-slate-100 pb-2">
               {[
                 "Sun",
@@ -941,89 +1289,96 @@ History presentation due Monday.`}
             </div>
 
             {/* DAYS */}
+
             <div className="grid grid-cols-7">
-              {calendarDays.map((date) => {
-                const dateKey =
-                  formatDate(date);
+              {calendarDays.map(
+                (date) => {
+                  const dateKey =
+                    formatDate(date);
 
-                const isCurrentMonth =
-                  date.getMonth() ===
-                    calendarMonth.getMonth() &&
-                  date.getFullYear() ===
-                    calendarMonth.getFullYear();
+                  const isCurrentMonth =
+                    date.getMonth() ===
+                      calendarMonth.getMonth() &&
+                    date.getFullYear() ===
+                      calendarMonth.getFullYear();
 
-                const isToday =
-                  dateKey === todayKey;
+                  const isToday =
+                    dateKey === todayKey;
 
-                const dayTasks =
-                  tasksByDate[dateKey] || [];
+                  const dayTasks =
+                    tasksByDate[
+                      dateKey
+                    ] || [];
 
-                return (
-                  <div
-                    key={dateKey}
-                    className={`min-h-28 border-b border-r border-slate-100 p-1.5 sm:min-h-32 sm:p-2 ${
-                      isCurrentMonth
-                        ? "bg-white"
-                        : "bg-slate-50/60"
-                    }`}
-                  >
+                  return (
                     <div
-                      className={`mb-1 flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold ${
-                        isToday
-                          ? "bg-indigo-600 text-white"
-                          : isCurrentMonth
-                          ? "text-slate-700"
-                          : "text-slate-300"
+                      key={dateKey}
+                      className={`min-h-28 border-b border-r border-slate-100 p-1.5 sm:min-h-32 sm:p-2 ${
+                        isCurrentMonth
+                          ? "bg-white"
+                          : "bg-slate-50/60"
                       }`}
                     >
-                      {date.getDate()}
-                    </div>
+                      <div
+                        className={`mb-1 flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold ${
+                          isToday
+                            ? "bg-indigo-600 text-white"
+                            : isCurrentMonth
+                            ? "text-slate-700"
+                            : "text-slate-300"
+                        }`}
+                      >
+                        {date.getDate()}
+                      </div>
 
-                    <div className="space-y-1">
-                      {dayTasks.map(
-                        (task) => (
-                          <button
-                            key={task.id}
-                            onClick={() =>
-                              toggleTask(
+                      <div className="space-y-1">
+                        {dayTasks.map(
+                          (task) => (
+                            <button
+                              key={
                                 task.id
-                              )
-                            }
-                            title={`${task.title} — click to ${
-                              task.completed
-                                ? "mark incomplete"
-                                : "mark complete"
-                            }`}
-                            className={`w-full rounded-lg p-1.5 text-left text-[10px] font-semibold transition sm:text-xs ${
-                              task.completed
-                                ? "bg-slate-100 text-slate-400 line-through"
-                                : task.priority ===
-                                  "High"
-                                ? "bg-red-50 text-red-700 hover:bg-red-100"
-                                : task.priority ===
-                                  "Medium"
-                                ? "bg-amber-50 text-amber-700 hover:bg-amber-100"
-                                : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                            }`}
-                          >
-                            {task.title}
-                          </button>
-                        )
-                      )}
+                              }
+                              onClick={() =>
+                                toggleTask(
+                                  task.id
+                                )
+                              }
+                              title={`${task.title} — click to ${
+                                task.completed
+                                  ? "mark incomplete"
+                                  : "mark complete"
+                              }`}
+                              className={`w-full rounded-lg p-1.5 text-left text-[10px] font-semibold transition sm:text-xs ${
+                                task.completed
+                                  ? "bg-slate-100 text-slate-400 line-through"
+                                  : task.priority ===
+                                    "High"
+                                  ? "bg-red-50 text-red-700 hover:bg-red-100"
+                                  : task.priority ===
+                                    "Medium"
+                                  ? "bg-amber-50 text-amber-700 hover:bg-amber-100"
+                                  : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                              }`}
+                            >
+                              {
+                                task.title
+                              }
+                            </button>
+                          )
+                        )}
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                }
+              )}
             </div>
           </div>
 
           {/* UNSCHEDULED */}
+
           {tasks.some(
             (task) =>
-              !(
-                task.scheduledDate ||
-                getDateFromDue(task.due)
-              )
+              !getTaskDate(task)
           ) && (
             <div className="border-t border-slate-200 p-5">
               <h4 className="font-bold text-slate-800">
@@ -1031,17 +1386,17 @@ History presentation due Monday.`}
               </h4>
 
               <p className="mt-1 text-sm text-slate-500">
-                These tasks don&apos;t have a
-                recognizable calendar date yet.
+                These tasks don&apos;t
+                have a recognizable
+                calendar date yet.
               </p>
 
               <div className="mt-3 space-y-2">
                 {tasks
                   .filter(
                     (task) =>
-                      !(
-                        task.scheduledDate ||
-                        getDateFromDue(task.due)
+                      !getTaskDate(
+                        task
                       )
                   )
                   .map((task) => (
@@ -1055,7 +1410,8 @@ History presentation due Monday.`}
                         </p>
 
                         <p className="text-xs text-slate-400">
-                          {task.subject} • Due{" "}
+                          {task.subject}{" "}
+                          • Due{" "}
                           {task.due}
                         </p>
                       </div>
@@ -1079,7 +1435,10 @@ History presentation due Monday.`}
           )}
         </section>
 
-        {/* AI CALLOUT */}
+        {/* ==================================================
+            AI CALLOUT
+        ================================================== */}
+
         <section className="mt-10 overflow-hidden rounded-2xl border border-indigo-100 bg-indigo-50 p-6 sm:p-8">
           <div className="flex flex-col justify-between gap-6 md:flex-row md:items-center">
             <div>
@@ -1088,14 +1447,16 @@ History presentation due Monday.`}
               </div>
 
               <h3 className="text-2xl font-bold text-slate-950">
-                Stop organizing. Start learning.
+                Stop organizing. Start
+                learning.
               </h3>
 
               <p className="mt-2 max-w-2xl text-slate-600">
                 Paste your messy school
-                information and let SchoolSync
-                turn it into a clear plan you
-                can actually follow.
+                information and let
+                SchoolSync turn it into a
+                clear plan you can actually
+                follow.
               </p>
             </div>
 
@@ -1111,17 +1472,20 @@ History presentation due Monday.`}
           </div>
         </section>
 
+        {/* FOOTER */}
+
         <footer className="py-10 text-center text-sm text-slate-400">
-          SchoolSync • Built for students, by students.
+          SchoolSync • Built for
+          students, by students.
         </footer>
       </div>
     </main>
   );
 }
 
-// ==================================================
-// TASK CARD
-// ==================================================
+/* ==================================================
+   TASK CARD
+================================================== */
 
 function TaskCard({
   task,
@@ -1135,7 +1499,8 @@ function TaskCard({
     string
   > = {
     High: "bg-red-50 text-red-600",
-    Medium: "bg-amber-50 text-amber-600",
+    Medium:
+      "bg-amber-50 text-amber-600",
     Low: "bg-emerald-50 text-emerald-600",
   };
 
@@ -1180,17 +1545,23 @@ function TaskCard({
           </h4>
 
           <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-500">
-            <span>{task.subject}</span>
+            <span>
+              {task.subject}
+            </span>
 
             <span>•</span>
 
-            <span>Due {task.due}</span>
+            <span>
+              Due {task.due}
+            </span>
 
             {task.estimatedMinutes && (
               <>
                 <span>•</span>
+
                 <span>
-                  {task.estimatedMinutes} min
+                  {task.estimatedMinutes}{" "}
+                  min
                 </span>
               </>
             )}
@@ -1200,7 +1571,9 @@ function TaskCard({
 
       <span
         className={`w-fit rounded-full px-3 py-1 text-xs font-bold ${
-          priorityClasses[task.priority]
+          priorityClasses[
+            task.priority
+          ]
         }`}
       >
         {task.priority} priority
