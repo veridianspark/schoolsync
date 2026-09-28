@@ -1,484 +1,518 @@
+import { GoogleGenAI } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
 
-const API_KEY = process.env.GEMINI_API_KEY;
+type Priority = "High" | "Medium" | "Low";
 
+type Task = {
+  title: string;
+  subject: string;
+  due: string;
+  scheduledDate?: string;
+  priority: Priority;
+  estimatedMinutes: number;
+  reason: string;
+};
+
+const MAX_INPUT_LENGTH = 8000;
+
+// Change this in Vercel Environment Variables if needed.
+// Example: GEMINI_MODEL=gemini-3.8-flash
 const MODEL =
   process.env.GEMINI_MODEL || "gemini-3.8-flash";
 
-type GeminiPart = {
-  text?: string;
-  inlineData?: {
-    mimeType: string;
-    data: string;
-  };
-};
+/* =========================================================
+   DATE HELPERS
+========================================================= */
 
-async function callGemini(
-  parts: GeminiPart[]
+function localDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function addDays(date: Date, amount: number) {
+  const result = new Date(date);
+  result.setDate(result.getDate() + amount);
+  return result;
+}
+
+function nextWeekday(
+  weekday: number,
+  from = new Date()
 ) {
-  if (!API_KEY) {
-    throw new Error(
-      "GEMINI_API_KEY is not configured."
-    );
+  const today = from.getDay();
+
+  let difference = weekday - today;
+
+  if (difference <= 0) {
+    difference += 7;
   }
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${API_KEY}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-            parts,
-          },
-        ],
-        generationConfig: {
-          temperature: 0.3,
-          responseMimeType: "application/json",
-        },
-      }),
+  return addDays(from, difference);
+}
+
+function parseDate(text: string): string | undefined {
+  if (!text) return undefined;
+
+  const value = text
+    .toLowerCase()
+    .replace(/,/g, "")
+    .trim();
+
+  const today = new Date();
+
+  if (
+    value === "today" ||
+    value.includes("today")
+  ) {
+    return localDateKey(today);
+  }
+
+  if (
+    value === "tomorrow" ||
+    value.includes("tomorrow")
+  ) {
+    return localDateKey(addDays(today, 1));
+  }
+
+  if (value.includes("day after tomorrow")) {
+    return localDateKey(addDays(today, 2));
+  }
+
+  const weekdays: Record<string, number> = {
+    sunday: 0,
+    monday: 1,
+    tuesday: 2,
+    wednesday: 3,
+    thursday: 4,
+    friday: 5,
+    saturday: 6,
+  };
+
+  for (const [name, weekday] of Object.entries(
+    weekdays
+  )) {
+    if (value.includes(name)) {
+      return localDateKey(
+        nextWeekday(weekday, today)
+      );
     }
+  }
+
+  const shortDays: Record<string, number> = {
+    sun: 0,
+    mon: 1,
+    tue: 2,
+    wed: 3,
+    thu: 4,
+    fri: 5,
+    sat: 6,
+  };
+
+  for (const [name, weekday] of Object.entries(
+    shortDays
+  )) {
+    if (
+      value === name ||
+      value.includes(`${name} `)
+    ) {
+      return localDateKey(
+        nextWeekday(weekday, today)
+      );
+    }
+  }
+
+  const iso = value.match(
+    /\b(\d{4})-(\d{2})-(\d{2})\b/
   );
 
-  const text = await response.text();
-
-  if (!response.ok) {
-    throw new Error(
-      `Gemini API error: ${text.slice(0, 500)}`
-    );
+  if (iso) {
+    return iso[0];
   }
 
-  let data: any;
-
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(
-      "Gemini returned an invalid response."
-    );
-  }
-
-  const output =
-    data?.candidates?.[0]?.content?.parts
-      ?.map((part: any) => part.text || "")
-      .join("")
-      .trim();
-
-  if (!output) {
-    throw new Error(
-      "Gemini returned an empty response."
-    );
-  }
-
-  return output;
+  return undefined;
 }
 
-function cleanJson(text: string) {
-  return text
-    .replace(/^```json\s*/i, "")
-    .replace(/^```\s*/i, "")
-    .replace(/\s*```$/i, "")
+/* =========================================================
+   LOCAL FALLBACK
+   This means the demo still works if Gemini is unavailable.
+========================================================= */
+
+function detectSubject(text: string) {
+  const lower = text.toLowerCase();
+
+  if (
+    lower.includes("biology") ||
+    lower.includes("bio")
+  ) {
+    return "Biology";
+  }
+
+  if (
+    lower.includes("math") ||
+    lower.includes("algebra") ||
+    lower.includes("calculus")
+  ) {
+    return "Mathematics";
+  }
+
+  if (
+    lower.includes("history") ||
+    lower.includes("historical")
+  ) {
+    return "History";
+  }
+
+  if (
+    lower.includes("english") ||
+    lower.includes("essay") ||
+    lower.includes("chapter")
+  ) {
+    return "English";
+  }
+
+  if (
+    lower.includes("physics") ||
+    lower.includes("physics")
+  ) {
+    return "Physics";
+  }
+
+  if (
+    lower.includes("chemistry") ||
+    lower.includes("chem")
+  ) {
+    return "Chemistry";
+  }
+
+  if (
+    lower.includes("python") ||
+    lower.includes("coding") ||
+    lower.includes("programming")
+  ) {
+    return "Computer Science";
+  }
+
+  return "General";
+}
+
+function detectPriority(text: string): Priority {
+  const lower = text.toLowerCase();
+
+  if (
+    lower.includes("urgent") ||
+    lower.includes("exam") ||
+    lower.includes("quiz") ||
+    lower.includes("test") ||
+    lower.includes("tomorrow") ||
+    lower.includes("today")
+  ) {
+    return "High";
+  }
+
+  if (
+    lower.includes("important") ||
+    lower.includes("presentation") ||
+    lower.includes("project")
+  ) {
+    return "Medium";
+  }
+
+  return "Low";
+}
+
+function detectMinutes(text: string) {
+  const lower = text.toLowerCase();
+
+  if (
+    lower.includes("exam") ||
+    lower.includes("quiz") ||
+    lower.includes("test")
+  ) {
+    return 30;
+  }
+
+  if (
+    lower.includes("presentation") ||
+    lower.includes("project")
+  ) {
+    return 60;
+  }
+
+  return 30;
+}
+
+function createLocalTask(
+  text: string
+): Task {
+  const clean = text.trim();
+
+  const subject = detectSubject(clean);
+  const priority = detectPriority(clean);
+  const scheduledDate = parseDate(clean);
+
+  let title = clean
+    .replace(
+      /\b(due|by|on|tomorrow|today)\b.*$/i,
+      ""
+    )
     .trim();
+
+  if (!title) {
+    title = clean;
+  }
+
+  return {
+    title:
+      title.charAt(0).toUpperCase() +
+      title.slice(1),
+
+    subject,
+
+    due: scheduledDate
+      ? new Date(
+          `${scheduledDate}T00:00:00`
+        ).toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+        })
+      : "No deadline",
+
+    scheduledDate,
+
+    priority,
+
+    estimatedMinutes: detectMinutes(clean),
+
+    reason:
+      priority === "High"
+        ? "This looks time-sensitive or important."
+        : "Added from your school information.",
+  };
 }
 
-/* =====================================================
-   TASK ORGANIZER
-===================================================== */
-
-async function organizeTasks(
+function localFallback(
   schoolInfo: string
-) {
-  const prompt = `
-You are SchoolSync, an AI schoolwork organizer.
+): Task[] {
+  const lines = schoolInfo
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 
-Analyze the student's school information below and
-extract every meaningful school task, assignment,
-quiz, test, presentation, reading, project, deadline,
-or other actionable schoolwork item.
+  if (lines.length === 0) {
+    return [];
+  }
+
+  return lines
+    .slice(0, 20)
+    .map(createLocalTask);
+}
+
+/* =========================================================
+   GEMINI
+========================================================= */
+
+async function organizeWithGemini(
+  schoolInfo: string
+): Promise<Task[]> {
+  const apiKey =
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("NO_API_KEY");
+  }
+
+  const ai = new GoogleGenAI({
+    apiKey,
+  });
+
+  const today = localDateKey();
+
+  const prompt = `
+You are SchoolSync, an AI school-work organizer.
+
+Today's local date is ${today}.
+
+Turn the student's messy school information into a JSON array of tasks.
+
+Rules:
+- Extract every real school task.
+- Identify the subject.
+- Identify the deadline.
+- Convert relative dates such as "today", "tomorrow", and weekdays into YYYY-MM-DD.
+- Use the provided today's date when calculating relative dates.
+- Do NOT move a task to a different date.
+- Priority must be High, Medium, or Low.
+- estimatedMinutes must be a number.
+- Keep titles short and clear.
+- If there is no deadline, scheduledDate should be null.
 
 Return ONLY valid JSON.
 
-Use exactly this structure:
+Required format:
 
-{
-  "tasks": [
-    {
-      "title": "short task title",
-      "subject": "subject",
-      "due": "human-readable deadline",
-      "dueDate": "YYYY-MM-DD or empty string if unknown",
-      "priority": "High | Medium | Low",
-      "estimatedMinutes": 30,
-      "reason": "short explanation"
-    }
-  ]
-}
-
-Rules:
-- Do not invent deadlines.
-- If a deadline is not provided, use "No deadline".
-- Infer the subject only when it is reasonably clear.
-- High priority means urgent, soon, or an important assessment.
-- Medium means a normal upcoming assignment.
-- Low means less urgent.
-- estimatedMinutes should be a reasonable estimate.
-- Extract multiple tasks when multiple tasks are present.
-- Keep titles concise.
-- Return an empty tasks array if there are no actionable tasks.
+[
+  {
+    "title": "Biology Chapter 7 Quiz",
+    "subject": "Biology",
+    "due": "Sep 29",
+    "scheduledDate": "2026-09-29",
+    "priority": "High",
+    "estimatedMinutes": 30,
+    "reason": "Upcoming assessment."
+  }
+]
 
 Student information:
 
 ${schoolInfo}
 `;
 
-  const output = await callGemini([
-    {
-      text: prompt,
-    },
-  ]);
-
-  const parsed = JSON.parse(
-    cleanJson(output)
-  );
-
-  if (!Array.isArray(parsed.tasks)) {
-    throw new Error(
-      "AI returned an invalid task list."
-    );
-  }
-
-  return parsed;
-}
-
-/* =====================================================
-   STUDY MATERIAL ANALYZER
-===================================================== */
-
-async function analyzeStudyMaterial(
-  notes: string,
-  files: File[]
-) {
-  const parts: GeminiPart[] = [];
-
-  const prompt = `
-You are SchoolSync AI, a study assistant.
-
-Analyze the student's study material carefully.
-
-The material may contain:
-- pasted notes
-- textbook material
-- lecture notes
-- essays
-- PDFs
-- screenshots
-- photographs of handwritten notes
-- TXT files
-- Markdown files
-
-Your job is to transform the supplied material into
-a useful study guide.
-
-IMPORTANT:
-- Base the response on the supplied material.
-- Do not invent facts that are not supported by it.
-- Preserve important terminology from the material.
-- Do not omit major concepts merely to make the response shorter.
-- If something is unclear in the material, say so rather than guessing.
-- Make the explanation suitable for a student.
-
-Return ONLY valid JSON with exactly this structure:
-
-{
-  "summary": "A clear but detailed summary of the material.",
-  "keyPoints": [
-    "Important concept 1",
-    "Important concept 2",
-    "Important concept 3"
-  ],
-  "flowchart": [
-    {
-      "step": 1,
-      "title": "First major concept",
-      "description": "Explain what happens or what this concept means."
-    },
-    {
-      "step": 2,
-      "title": "Next concept",
-      "description": "Explain the relationship to the previous concept."
-    }
-  ],
-  "questions": [
-    {
-      "question": "A useful revision question.",
-      "answer": "The answer based on the supplied material."
-    }
-  ]
-}
-
-Requirements:
-
-SUMMARY
-- Explain the central ideas clearly.
-- Preserve important details.
-- Organize a long essay into understandable sections
-  when appropriate.
-
-KEY POINTS
-- Extract the most important concepts.
-- Include terminology a student should remember.
-- Aim for 5-10 useful points when the material supports it.
-
-FLOWCHART
-- Show the logical progression of the material.
-- Use 4-10 steps when possible.
-- Each step must have a meaningful title and explanation.
-- If the material describes a process, make the flow follow
-  that process.
-- If it is conceptual rather than procedural, show the
-  relationships between the major ideas.
-
-REVISION QUESTIONS
-- Create useful study questions from the supplied material.
-- Mix recall and understanding questions.
-- Include approximately 5-10 questions when enough material
-  is available.
-- Answers must be supported by the supplied material.
-
-If the material is very short, return fewer items rather
-than inventing information.
-`;
-
-  parts.push({
-    text: prompt,
-  });
-
-  if (notes.trim()) {
-    parts.push({
-      text: `PASTED STUDY NOTES:\n\n${notes}`,
-    });
-  }
-
-  /*
-   * Gemini can directly understand supported image/PDF
-   * content when supplied as inlineData.
-   */
-  for (const file of files) {
-    const arrayBuffer =
-      await file.arrayBuffer();
-
-    const buffer = Buffer.from(arrayBuffer);
-
-    parts.push({
-      text: `ATTACHED FILE: ${file.name}`,
-    });
-
-    parts.push({
-      inlineData: {
-        mimeType:
-          file.type || "application/octet-stream",
-        data: buffer.toString("base64"),
+  const response =
+    await ai.models.generateContent({
+      model: MODEL,
+      contents: prompt,
+      config: {
+        temperature: 0.1,
+        responseMimeType: "application/json",
       },
     });
+
+  const raw = response.text;
+
+  if (!raw) {
+    throw new Error("EMPTY_AI_RESPONSE");
   }
 
-  const output = await callGemini(parts);
+  const parsed = JSON.parse(raw);
 
-  let parsed: any;
-
-  try {
-    parsed = JSON.parse(
-      cleanJson(output)
-    );
-  } catch {
-    throw new Error(
-      "AI returned invalid study-analysis JSON."
-    );
+  if (!Array.isArray(parsed)) {
+    throw new Error("INVALID_AI_RESPONSE");
   }
 
-  if (
-    typeof parsed.summary !== "string" ||
-    !Array.isArray(parsed.keyPoints) ||
-    !Array.isArray(parsed.flowchart) ||
-    !Array.isArray(parsed.questions)
-  ) {
-    throw new Error(
-      "AI returned an incomplete study analysis."
-    );
-  }
+  return parsed.map((task: any) => {
+    const scheduledDate =
+      typeof task.scheduledDate === "string"
+        ? task.scheduledDate
+        : parseDate(
+            String(task.due || "")
+          );
 
-  return parsed;
+    return {
+      title: String(
+        task.title || "Untitled task"
+      ),
+
+      subject: String(
+        task.subject || "General"
+      ),
+
+      due: String(
+        task.due || "No deadline"
+      ),
+
+      scheduledDate,
+
+      priority:
+        task.priority === "High" ||
+        task.priority === "Medium" ||
+        task.priority === "Low"
+          ? task.priority
+          : "Medium",
+
+      estimatedMinutes:
+        typeof task.estimatedMinutes ===
+        "number"
+          ? task.estimatedMinutes
+          : 30,
+
+      reason:
+        typeof task.reason === "string"
+          ? task.reason
+          : "Upcoming schoolwork.",
+    };
+  });
 }
 
-/* =====================================================
-   POST
-===================================================== */
+/* =========================================================
+   API
+========================================================= */
 
 export async function POST(
   request: NextRequest
 ) {
   try {
-    const contentType =
-      request.headers.get("content-type") || "";
+    const body = await request.json();
 
-    /*
-     * EXISTING TASK ORGANIZER
-     *
-     * page.tsx sends JSON here.
-     */
+    const schoolInfo =
+      typeof body?.schoolInfo === "string"
+        ? body.schoolInfo.trim()
+        : "";
+
+    if (!schoolInfo) {
+      return NextResponse.json(
+        {
+          error:
+            "Please paste some school information.",
+        },
+        { status: 400 }
+      );
+    }
+
     if (
-      contentType.includes(
-        "application/json"
-      )
+      schoolInfo.length >
+      MAX_INPUT_LENGTH
     ) {
-      const body = await request.json();
+      return NextResponse.json(
+        {
+          error:
+            "Please keep the school information under 8000 characters.",
+        },
+        { status: 400 }
+      );
+    }
 
-      const mode =
-        body?.mode || "tasks";
+    let tasks: Task[];
+    let usedFallback = false;
 
-      if (mode !== "tasks") {
-        return NextResponse.json(
-          {
-            error:
-              "Invalid JSON request mode.",
-          },
-          { status: 400 }
-        );
-      }
-
-      const schoolInfo =
-        typeof body?.schoolInfo === "string"
-          ? body.schoolInfo.trim()
-          : "";
-
-      if (!schoolInfo) {
-        return NextResponse.json(
-          {
-            error:
-              "Please provide school information.",
-          },
-          { status: 400 }
-        );
-      }
-
-      const result =
-        await organizeTasks(
+    try {
+      tasks =
+        await organizeWithGemini(
           schoolInfo
         );
-
-      return NextResponse.json(
-        result
+    } catch (error: any) {
+      console.error(
+        "Gemini unavailable:",
+        error
       );
-    }
-
-    /*
-     * NEW STUDY ANALYZER
-     *
-     * page.tsx sends FormData here so it can
-     * include notes + images + PDFs + text files.
-     */
-    if (
-      contentType.includes(
-        "multipart/form-data"
-      )
-    ) {
-      const formData =
-        await request.formData();
-
-      const mode =
-        String(
-          formData.get("mode") || ""
-        );
-
-      if (mode !== "study") {
-        return NextResponse.json(
-          {
-            error:
-              "Invalid study request.",
-          },
-          { status: 400 }
-        );
-      }
-
-      const notes =
-        String(
-          formData.get("notes") || ""
-        );
-
-      const files = formData
-        .getAll("files")
-        .filter(
-          (item): item is File =>
-            item instanceof File
-        );
-
-      if (
-        !notes.trim() &&
-        files.length === 0
-      ) {
-        return NextResponse.json(
-          {
-            error:
-              "Please provide notes or at least one file.",
-          },
-          { status: 400 }
-        );
-      }
 
       /*
-       * Prevent unexpectedly huge requests.
+       * IMPORTANT:
+       * Do not make the demo fail because of:
+       * - 429 quota errors
+       * - 503 unavailable errors
+       * - temporary model problems
+       * - invalid/missing API keys
        */
-      const MAX_FILES = 10;
-      const MAX_FILE_SIZE =
-        15 * 1024 * 1024;
 
-      if (files.length > MAX_FILES) {
-        return NextResponse.json(
-          {
-            error:
-              `You can upload up to ${MAX_FILES} files at once.`,
-          },
-          { status: 400 }
-        );
-      }
+      usedFallback = true;
 
-      for (const file of files) {
-        if (
-          file.size > MAX_FILE_SIZE
-        ) {
-          return NextResponse.json(
-            {
-              error:
-                `${file.name} is too large. Please keep files under 15 MB.`,
-            },
-            { status: 400 }
-          );
-        }
-      }
-
-      const result =
-        await analyzeStudyMaterial(
-          notes,
-          files
-        );
-
-      return NextResponse.json(
-        result
+      tasks = localFallback(
+        schoolInfo
       );
     }
 
-    return NextResponse.json(
-      {
-        error:
-          "Unsupported request type.",
-      },
-      { status: 415 }
-    );
-  } catch (error: any) {
+    return NextResponse.json({
+      tasks,
+      fallback: usedFallback,
+      model: usedFallback
+        ? "local-fallback"
+        : MODEL,
+    });
+  } catch (error) {
     console.error(
       "SchoolSync API error:",
       error
@@ -487,8 +521,7 @@ export async function POST(
     return NextResponse.json(
       {
         error:
-          error?.message ||
-          "Something went wrong while processing your request.",
+          "SchoolSync could not process that information.",
       },
       { status: 500 }
     );
